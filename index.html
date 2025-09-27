@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <base href="/planning-poker/">
     <title>Planning Poker</title>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -759,7 +760,7 @@
                 setIsHost(true);
                 setCurrentPage('game');
                 // Обновление URL без перезагрузки страницы
-                window.history.pushState({}, '', `/game/${id}`);
+                window.history.pushState({}, '', `./game/${id}`);
             };
             
             const handleJoinGame = () => {
@@ -779,7 +780,7 @@
             const handleNewVoting = () => {
                 setCurrentPage('create');
                 sessionStorage.removeItem('currentGame');
-                window.history.pushState({}, '', '/');
+                window.history.pushState({}, '', './');
             };
             
             return React.createElement('div', null,
