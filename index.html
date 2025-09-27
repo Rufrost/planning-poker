@@ -3,12 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <base href="/planning-poker/">
     <title>Planning Poker</title>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body {
@@ -42,6 +40,11 @@
             box-shadow: 0 0 15px rgba(14, 165, 233, 0.5);
         }
         
+        .card-back {
+            background: linear-gradient(145deg, #0f172a, #1e293b) !important;
+            color: transparent !important;
+        }
+        
         .poker-table {
             background: linear-gradient(145deg, #1e293b, #0f172a);
             border-radius: 20px;
@@ -52,6 +55,9 @@
             align-items: center;
             justify-content: center;
             border: 2px solid #334155;
+            margin: 0 auto;
+            width: 100%;
+            max-width: 600px;
         }
         
         .player-card {
@@ -314,20 +320,22 @@
                         name: gameName,
                         deck: deck,
                         isHost: true,
-                        players: []
+                        players: [],
+                        gameState: 'waiting',
+                        results: null
                     };
                     
-                    // Сохранение в sessionStorage
-                    sessionStorage.setItem('currentGame', JSON.stringify(gameData));
+                    // Сохранение игры в localStorage (для синхронизации)
+                    localStorage.setItem(`poker-game-${sessionId}`, JSON.stringify(gameData));
                     
-                    // Сохранение в localStorage для истории
-                    const savedGames = JSON.parse(localStorage.getItem('savedGames') || '[]');
-                    savedGames.push({
+                    // Сохранение в sessionStorage для текущей сессии
+                    sessionStorage.setItem('currentGame', JSON.stringify({
                         id: sessionId,
                         name: gameName,
-                        date: new Date().toISOString()
-                    });
-                    localStorage.setItem('savedGames', JSON.stringify(savedGames));
+                        isHost: true,
+                        playerId: sessionId, // ID хоста
+                        playerName: 'Тимлид'
+                    }));
                     
                     onGameCreated(sessionId);
                 }
@@ -414,7 +422,7 @@
         // Компонент карты игрока за столом
         function PlayerCard({ player, position, totalPlayers, isRevealed }) {
             const angle = (360 / totalPlayers) * position;
-            const radius = 150;
+            const radius = totalPlayers <= 6 ? 120 : 150;
             const x = Math.cos(angle * Math.PI / 180) * radius;
             const y = Math.sin(angle * Math.PI / 180) * radius;
             
@@ -433,250 +441,181 @@
                     }
                 }, isRevealed && player.vote ? player.vote : ''),
                 React.createElement('div', {
-                    className: 'text-center mt-2 text-sm'
+                    className: 'text-center mt-2 text-sm max-w-[60px] truncate'
                 }, player.name)
             );
         }
 
         // Компонент страницы игры
         function GamePage({ sessionId, isHost, onNewVoting }) {
-            const [players, setPlayers] = useState([]);
+            const [gameData, setGameData] = useState(null);
             const [currentPlayer, setCurrentPlayer] = useState(null);
             const [selectedCard, setSelectedCard] = useState(null);
-            const [gameState, setGameState] = useState('waiting'); // waiting, voting, revealing, results
-            const [countdown, setCountdown] = useState(0);
-            const [results, setResults] = useState(null);
-            const [deck, setDeck] = useState(null);
-            const peerRef = useRef(null);
-            const connRef = useRef(null);
+            const [lastUpdate, setLastUpdate] = useState(Date.now());
+            const pollingRef = useRef(null);
             
             useEffect(() => {
-                // Загрузка данных игры из sessionStorage
-                const gameData = JSON.parse(sessionStorage.getItem('currentGame'));
-                if (gameData) {
-                    setDeck(gameData.deck);
-                    
-                    if (isHost) {
-                        // Хост создает Peer соединение
-                        const peer = new Peer(sessionId, {
-                        host: '0.peerjs.com',
-                        port: 443,
-                        secure: true
-                        });
-                        peerRef.current = peer;
-                        
-                        peer.on('connection', (conn) => {
-                            connRef.current = conn;
-                            conn.on('data', (data) => {
-                                handlePlayerData(data);
-                            });
-                        });
-                        
-                        // Добавление хоста в список игроков
-                        setCurrentPlayer({
-                            id: sessionId,
-                            name: gameData.hostName || 'Тимлид',
-                            isHost: true
-                        });
-                        
-                        setPlayers(prev => [...prev, {
-                            id: sessionId,
-                            name: gameData.hostName || 'Тимлид',
-                            isHost: true
-                        }]);
-                    } else {
-                        // Игрок присоединяется к существующей игре
-                        const peer = new Peer(undefined, {
-                        host: '0.peerjs.com',
-                        port: 443,
-                        secure: true
-                        });
-                        peerRef.current = peer;
-                        
-                        peer.on('open', (id) => {
-                            const conn = peer.connect(sessionId);
-                            connRef.current = conn;
-                            
-                            conn.on('open', () => {
-                                // Отправка данных игрока хосту
-                                conn.send({
-                                    type: 'player-join',
-                                    player: {
-                                        id: id,
-                                        name: currentPlayer?.name || 'Игрок',
-                                        isHost: false
-                                    }
-                                });
-                            });
-                            
-                            conn.on('data', (data) => {
-                                handleGameData(data);
-                            });
-                        });
-                    }
-                }
+                // Загрузка данных игрока из sessionStorage
+                const playerData = JSON.parse(sessionStorage.getItem('currentGame'));
+                setCurrentPlayer(playerData);
+                
+                // Начальная загрузка данных игры
+                loadGameData();
+                
+                // Запуск polling для обновления данных
+                pollingRef.current = setInterval(loadGameData, 2000);
                 
                 return () => {
-                    if (peerRef.current) {
-                        peerRef.current.destroy();
+                    if (pollingRef.current) {
+                        clearInterval(pollingRef.current);
                     }
                 };
-            }, [sessionId, isHost]);
+            }, [sessionId]);
             
-            const handlePlayerData = (data) => {
-                if (data.type === 'player-join') {
-                    setPlayers(prev => [...prev, data.player]);
+            const loadGameData = () => {
+                const data = localStorage.getItem(`poker-game-${sessionId}`);
+                if (data) {
+                    const game = JSON.parse(data);
+                    setGameData(game);
+                    setLastUpdate(Date.now());
                     
-                    // Отправка текущего состояния игры новому игроку
-                    connRef.current.send({
-                        type: 'game-state',
-                        players: players,
-                        gameState: gameState,
-                        deck: deck
-                    });
-                } else if (data.type === 'player-vote') {
-                    setPlayers(prev => prev.map(p => 
-                        p.id === data.playerId ? { ...p, vote: data.vote } : p
-                    ));
-                    
-                    // Проверка, все ли проголосовали
-                    const allVoted = players.every(p => p.vote !== null);
-                    if (allVoted && isHost) {
-                        setGameState('ready-to-reveal');
+                    // Проверяем, есть ли текущий игрок в списке игроков
+                    if (currentPlayer && !game.players.find(p => p.id === currentPlayer.playerId)) {
+                        // Добавляем игрока в игру
+                        addPlayerToGame();
                     }
                 }
             };
             
-            const handleGameData = (data) => {
-                if (data.type === 'game-state') {
-                    setPlayers(data.players);
-                    setGameState(data.gameState);
-                    setDeck(data.deck);
-                } else if (data.type === 'start-reveal') {
-                    setGameState('revealing');
-                    startCountdown();
-                } else if (data.type === 'new-voting') {
-                    setGameState('waiting');
-                    setSelectedCard(null);
-                    setResults(null);
-                    setPlayers(prev => prev.map(p => ({ ...p, vote: null })));
-                }
-            };
-            
-            const startCountdown = () => {
-                setCountdown(3);
-                const interval = setInterval(() => {
-                    setCountdown(prev => {
-                        if (prev <= 1) {
-                            clearInterval(interval);
-                            calculateResults();
-                            return 0;
-                        }
-                        return prev - 1;
-                    });
-                }, 1000);
-            };
-            
-            const calculateResults = () => {
-                const votes = players.map(p => p.vote).filter(v => v && v !== '?');
-                const numericVotes = votes.map(v => {
-                    if (v === '½') return 0.5;
-                    return parseFloat(v) || 0;
-                }).filter(v => !isNaN(v));
-                
-                if (numericVotes.length > 0) {
-                    const sum = numericVotes.reduce((a, b) => a + b, 0);
-                    const average = sum / numericVotes.length;
+            const addPlayerToGame = () => {
+                const data = localStorage.getItem(`poker-game-${sessionId}`);
+                if (data) {
+                    const game = JSON.parse(data);
+                    const newPlayer = {
+                        id: currentPlayer.playerId,
+                        name: currentPlayer.playerName,
+                        isHost: currentPlayer.isHost,
+                        vote: null
+                    };
                     
-                    const voteCounts = {};
-                    votes.forEach(vote => {
-                        voteCounts[vote] = (voteCounts[vote] || 0) + 1;
-                    });
-                    
-                    setResults({
-                        average: average.toFixed(1),
-                        votes: voteCounts
-                    });
+                    // Проверяем, нет ли уже этого игрока
+                    if (!game.players.find(p => p.id === newPlayer.id)) {
+                        game.players.push(newPlayer);
+                        localStorage.setItem(`poker-game-${sessionId}`, JSON.stringify(game));
+                        setGameData(game);
+                    }
                 }
-                
-                setGameState('results');
             };
             
             const handleVote = (card) => {
-                if (gameState === 'waiting' || gameState === 'voting') {
+                if (gameData && (gameData.gameState === 'waiting' || gameData.gameState === 'voting')) {
                     setSelectedCard(card);
-                    setGameState('voting');
                     
-                    // Отправка голоса хосту
-                    if (connRef.current) {
-                        connRef.current.send({
-                            type: 'player-vote',
-                            playerId: currentPlayer?.id,
-                            vote: card
-                        });
+                    // Обновляем голос в данных игры
+                    const updatedGame = { ...gameData };
+                    const playerIndex = updatedGame.players.findIndex(p => p.id === currentPlayer.playerId);
+                    
+                    if (playerIndex !== -1) {
+                        updatedGame.players[playerIndex].vote = card;
+                        updatedGame.gameState = 'voting';
+                        
+                        // Проверяем, все ли проголосовали
+                        const allVoted = updatedGame.players.every(p => p.vote !== null);
+                        if (allVoted && isHost) {
+                            updatedGame.gameState = 'ready-to-reveal';
+                        }
+                        
+                        localStorage.setItem(`poker-game-${sessionId}`, JSON.stringify(updatedGame));
+                        setGameData(updatedGame);
                     }
-                    
-                    // Обновление локального состояния
-                    setPlayers(prev => prev.map(p => 
-                        p.id === currentPlayer?.id ? { ...p, vote: card } : p
-                    ));
                 }
             };
             
             const handleRevealCards = () => {
-                if (isHost) {
-                    setGameState('revealing');
-                    startCountdown();
+                if (isHost && gameData) {
+                    const updatedGame = { ...gameData };
+                    updatedGame.gameState = 'revealing';
+                    localStorage.setItem(`poker-game-${sessionId}`, JSON.stringify(updatedGame));
+                    setGameData(updatedGame);
                     
-                    // Уведомление всех игроков о начале вскрытия карт
-                    if (connRef.current) {
-                        connRef.current.send({
-                            type: 'start-reveal'
+                    // Запускаем отсчет
+                    setTimeout(() => {
+                        calculateResults();
+                    }, 3000);
+                }
+            };
+            
+            const calculateResults = () => {
+                if (gameData) {
+                    const updatedGame = { ...gameData };
+                    const votes = updatedGame.players.map(p => p.vote).filter(v => v && v !== '?');
+                    const numericVotes = votes.map(v => {
+                        if (v === '½') return 0.5;
+                        return parseFloat(v) || 0;
+                    }).filter(v => !isNaN(v));
+                    
+                    let results = null;
+                    if (numericVotes.length > 0) {
+                        const sum = numericVotes.reduce((a, b) => a + b, 0);
+                        const average = sum / numericVotes.length;
+                        
+                        const voteCounts = {};
+                        votes.forEach(vote => {
+                            voteCounts[vote] = (voteCounts[vote] || 0) + 1;
                         });
+                        
+                        results = {
+                            average: average.toFixed(1),
+                            votes: voteCounts
+                        };
                     }
+                    
+                    updatedGame.gameState = 'results';
+                    updatedGame.results = results;
+                    localStorage.setItem(`poker-game-${sessionId}`, JSON.stringify(updatedGame));
+                    setGameData(updatedGame);
                 }
             };
             
             const handleNewVoting = () => {
-                if (isHost) {
-                    setGameState('waiting');
-                    setSelectedCard(null);
-                    setResults(null);
-                    setPlayers(prev => prev.map(p => ({ ...p, vote: null })));
+                if (isHost && gameData) {
+                    const updatedGame = { ...gameData };
+                    updatedGame.gameState = 'waiting';
+                    updatedGame.results = null;
+                    updatedGame.players = updatedGame.players.map(p => ({ ...p, vote: null }));
                     
-                    // Уведомление всех игроков о новом голосовании
-                    if (connRef.current) {
-                        connRef.current.send({
-                            type: 'new-voting'
-                        });
-                    }
+                    localStorage.setItem(`poker-game-${sessionId}`, JSON.stringify(updatedGame));
+                    setGameData(updatedGame);
+                    setSelectedCard(null);
                 }
             };
             
-            if (!deck) {
-                return React.createElement('div', { className: 'p-6 text-center' }, 'Загрузка...');
+            if (!gameData || !currentPlayer) {
+                return React.createElement('div', { className: 'p-6 text-center' }, 'Загрузка игры...');
             }
             
-            const allVoted = players.length > 0 && players.every(p => p.vote !== null);
-            const isRevealed = gameState === 'results';
+            const allVoted = gameData.players.length > 0 && gameData.players.every(p => p.vote !== null);
+            const isRevealed = gameData.gameState === 'results';
+            const currentPlayerData = gameData.players.find(p => p.id === currentPlayer.playerId);
+            const hasVoted = currentPlayerData && currentPlayerData.vote !== null;
             
             return React.createElement('div', { className: 'p-4 max-w-4xl mx-auto' },
-                React.createElement('h1', { className: 'text-2xl font-bold mb-4 text-center' }, 'Planning Poker'),
+                React.createElement('h1', { className: 'text-2xl font-bold mb-4 text-center' }, gameData.name),
                 
                 React.createElement('div', { className: 'poker-table mb-6' },
-                    players.length === 0 ? 
+                    gameData.players.length === 0 ? 
                         React.createElement('div', { className: 'text-slate-400' }, 'Ожидание игроков...') :
                         React.createElement(React.Fragment, null,
-                            gameState === 'revealing' ? 
-                                React.createElement('div', { className: 'countdown' }, countdown) :
-                                gameState === 'results' ?
+                            gameData.gameState === 'revealing' ? 
+                                React.createElement('div', { className: 'countdown' }, '3') :
+                                gameData.gameState === 'results' ?
                                     React.createElement('div', { className: 'text-center' },
-                                        React.createElement('div', { className: 'average' }, `Среднее: ${results?.average}`),
+                                        gameData.results && React.createElement('div', { className: 'average' }, `Среднее: ${gameData.results.average}`),
                                         React.createElement('button', {
                                             className: `btn-primary mt-4 ${isHost ? '' : 'opacity-50 cursor-not-allowed'}`,
                                             onClick: handleNewVoting,
                                             disabled: !isHost
-                                        }, 'Заново')
+                                        }, 'Начать новое голосование')
                                     ) :
                                     React.createElement('div', { className: 'text-center' },
                                         isHost ? 
@@ -687,25 +626,25 @@
                                                 }, 'Вскрыть карты') :
                                                 React.createElement('div', { className: 'text-slate-400' }, 'Выбери карту!') :
                                             React.createElement('div', { className: 'text-slate-400' }, 
-                                                selectedCard ? 'Ожидание участников' : 'Выбери карту!'
+                                                hasVoted ? 'Ожидание участников' : 'Выбери карту!'
                                             )
                                     ),
                             
-                            players.map((player, index) => 
+                            gameData.players.map((player, index) => 
                                 React.createElement(PlayerCard, {
                                     key: player.id,
                                     player: player,
                                     position: index,
-                                    totalPlayers: players.length,
+                                    totalPlayers: gameData.players.length,
                                     isRevealed: isRevealed
                                 })
                             )
                         )
                 ),
                 
-                gameState !== 'results' && React.createElement('div', { className: 'flex justify-center mb-6' },
+                gameData.gameState !== 'results' && React.createElement('div', { className: 'flex justify-center mb-6' },
                     React.createElement('div', { className: 'flex gap-2 flex-wrap justify-center' },
-                        deck.cards.map(card => 
+                        gameData.deck.cards.map(card => 
                             React.createElement('div', {
                                 key: card,
                                 className: `card ${selectedCard === card ? 'selected' : ''}`,
@@ -715,10 +654,10 @@
                     )
                 ),
                 
-                gameState === 'results' && results && React.createElement('div', { className: 'results' },
-                    React.createElement('div', { className: 'average' }, `Среднее значение: ${results.average}`),
+                gameData.gameState === 'results' && gameData.results && React.createElement('div', { className: 'results' },
+                    React.createElement('div', { className: 'average' }, `Среднее значение: ${gameData.results.average}`),
                     React.createElement('div', { className: 'flex flex-wrap justify-center' },
-                        Object.entries(results.votes).map(([card, count]) => 
+                        Object.entries(gameData.results.votes).map(([card, count]) => 
                             React.createElement('div', { key: card, className: 'result-card' },
                                 React.createElement('div', { className: 'card' }, card),
                                 React.createElement('div', { className: 'text-center mt-1' }, count)
@@ -727,8 +666,8 @@
                     )
                 ),
                 
-                React.createElement('div', { className: 'text-center text-slate-400' },
-                    `Игроков: ${players.length} | ID сессии: ${sessionId}`
+                React.createElement('div', { className: 'text-center text-slate-400 text-sm mt-4' },
+                    `Игроков: ${gameData.players.length} | Ваша роль: ${isHost ? 'Тимлид' : 'Игрок'} | ID сессии: ${sessionId}`
                 )
             );
         }
@@ -749,17 +688,17 @@
                     setIsHost(gameData.isHost);
                     setCurrentPage('game');
                     
-                    if (!gameData.hostName && gameData.isHost) {
-                        setPlayerName('Тимлид');
+                    if (gameData.playerName) {
+                        setPlayerName(gameData.playerName);
                     }
                 } else {
                     // Проверка, перешли ли мы по ссылке на игру
-                    const path = window.location.pathname.split('/').filter(Boolean); 
-                    if (path.length > 1 && path[path.length - 2] === 'game') {
-                    setSessionId(path[path.length - 1]);
-                    setIsHost(false);
-                    setShowJoinModal(true);
-}
+                    const path = window.location.pathname.split('/');
+                    if (path.length > 2 && path[1] === 'game') {
+                        setSessionId(path[2]);
+                        setIsHost(false);
+                        setShowJoinModal(true);
+                    }
                 }
             }, []);
             
@@ -768,14 +707,16 @@
                 setIsHost(true);
                 setCurrentPage('game');
                 // Обновление URL без перезагрузки страницы
-                window.history.pushState({}, '', `./game/${id}`);
+                window.history.pushState({}, '', `/game/${id}`);
             };
             
             const handleJoinGame = () => {
                 if (playerName.trim()) {
+                    const playerId = generateId();
                     const gameData = {
                         id: sessionId,
                         isHost: false,
+                        playerId: playerId,
                         playerName: playerName
                     };
                     
@@ -788,7 +729,11 @@
             const handleNewVoting = () => {
                 setCurrentPage('create');
                 sessionStorage.removeItem('currentGame');
-                window.history.pushState({}, '', './');
+                // Удаляем игру из localStorage если хост выходит
+                if (isHost) {
+                    localStorage.removeItem(`poker-game-${sessionId}`);
+                }
+                window.history.pushState({}, '', '/');
             };
             
             return React.createElement('div', null,
