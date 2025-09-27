@@ -746,12 +746,12 @@
                     }
                 } else {
                     // Проверка, перешли ли мы по ссылке на игру
-                    const path = window.location.pathname.split('/');
-                    if (path.length > 2 && path[1] === 'game') {
-                        setSessionId(path[2]);
-                        setIsHost(false);
-                        setShowJoinModal(true);
-                    }
+                    const path = window.location.pathname.split('/').filter(Boolean); 
+                    if (path.length > 1 && path[path.length - 2] === 'game') {
+                    setSessionId(path[path.length - 1]);
+                    setIsHost(false);
+                    setShowJoinModal(true);
+}
                 }
             }, []);
             
