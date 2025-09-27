@@ -458,7 +458,11 @@
                     
                     if (isHost) {
                         // Хост создает Peer соединение
-                        const peer = new Peer(sessionId);
+                        const peer = new Peer(sessionId, {
+                        host: '0.peerjs.com',
+                        port: 443,
+                        secure: true
+                        });
                         peerRef.current = peer;
                         
                         peer.on('connection', (conn) => {
@@ -482,7 +486,11 @@
                         }]);
                     } else {
                         // Игрок присоединяется к существующей игре
-                        const peer = new Peer();
+                        const peer = new Peer(undefined, {
+                        host: '0.peerjs.com',
+                        port: 443,
+                        secure: true
+                        });
                         peerRef.current = peer;
                         
                         peer.on('open', (id) => {
